@@ -1,0 +1,8 @@
+405028:	c3                   	ret    
+405029:	8b 84 24 84 00 00 00 	mov    0x84(%rsp),%eax
+405030:	89 84 24 8c 00 00 00 	mov    %eax,0x8c(%rsp)
+405037:	90                   	nop
+405038:	48 8d bc 24 8c 00 00 	lea    0x8c(%rsp),%rdi
+40503f:	00 
+405040:	ff 15 4a 8a 04 00    	call   *0x48a4a(%rip)        # 44da90 <_GLOBAL_OFFSET_TABLE_+0x188>
+405046:	48 89 84 24 c0 00 00 	mov    %rax,0xc0(%rsp)
