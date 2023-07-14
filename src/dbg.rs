@@ -3,7 +3,7 @@ use nix::{
     sys::{
         personality::{self, Persona},
         ptrace,
-        wait::{waitpid, WaitStatus},
+        wait::{waitpid, WaitStatus}, signal::Signal::SIGTRAP,
     },
     unistd::{execvp, fork, ForkResult, Pid},
 };
@@ -191,8 +191,16 @@ impl ZDbg<Running> {
         // TODO:
         //
         // addrの位置にブレークポイントを設定せよ
-
-        Err("TODO".into())
+        let value = ptrace::read(self.info.pid, addr).unwrap();
+        println!("<<以下のようにメモリを書き換えます>>");
+        println!("<<before: {:?}: {:02x?}>>", addr,value.to_le_bytes());
+        self.info.brk_val = value;
+        let breakpoint = (value & (i64::MAX ^ 0xFF)) | 0xCC;
+        unsafe{
+            ptrace::write(self.info.pid, addr, breakpoint as *mut c_void)?;
+        }
+        println!("<<after : {:?}: {:02x?}>>", addr, breakpoint.to_le_bytes()); 
+        Ok(())
     }
 
     /// breakを実行
@@ -206,14 +214,21 @@ impl ZDbg<Running> {
     /// stepiを実行。機械語レベルで1行実行
     fn do_stepi(self) -> Result<State, Box<dyn Error>> {
         // TODO: ここを実装せよ
-        //
-        // 次の実行アドレスがブレークポイントの場合、
-        // 先に、0xccに書き換えたメモリを元に戻す必要がある
-        // また、0xccを元に戻してステップ実行して、再度ブレークポイントを設定する必要がある (step_and_breakを呼び出すとよい)
-        //
-        // 次の実行アドレスがブレークポイントではない場合は、ptrace::stepとwait_childを呼び出すのみでよい
-
-        Err("TODO".into())
+        let regs = ptrace::getregs(self.info.pid).unwrap();
+        println!("do stepi > rip: {:#x}, brk_addr: {:#x}", regs.rip, self.info.brk_addr.unwrap() as u64);
+        if regs.rip == self.info.brk_addr.unwrap() as u64{
+            // 次の実行アドレスがブレークポイントの場合、
+            // 0xccに書き換えたメモリを元の値に戻す
+            unsafe{
+                ptrace::write(self.info.pid, self.info.brk_addr.unwrap(), self.info.brk_val as *mut c_void)?;
+            }
+            // ステップ実行して、再度ブレークポイントを設定する
+            self.step_and_break()
+        } else {
+            // 次の実行アドレスがブレークポイントではない場合は、ptrace::stepとwait_childを呼び出すのみでよい
+            ptrace::step(self.info.pid, None)?;
+            self.wait_child()
+        }
     }
 
     /// ブレークポイントで停止していた場合は
@@ -226,8 +241,20 @@ impl ZDbg<Running> {
         // その後、再度ブレークポイントを設定
         //
         // ブレークポイントでない場合は何もしない
-
-        Ok(State::Running(self))
+        let regs = ptrace::getregs(self.info.pid).unwrap();
+        println!("step_and_break > rip: {:#x}, brk_addr: {:#x}", regs.rip, self.info.brk_addr.unwrap() as u64);
+        if regs.rip == self.info.brk_addr.unwrap() as u64{
+            ptrace::step(self.info.pid, None)?;
+            match waitpid(self.info.pid, None)? {
+                WaitStatus::Stopped(..) => {
+                    self.set_break()?;
+                    Ok(State::Running(self))
+                }
+                _ => Err("waitpidの返り値が不正です".into()),
+            }
+        } else {
+            Ok(State::Running(self))
+        }
     }
 
     /// continueを実行
@@ -256,12 +283,19 @@ impl ZDbg<Running> {
             }
             WaitStatus::Stopped(..) => {
                 // TODO: ここを実装せよ
-                //
-                // 停止したアドレスがブレークポイントのアドレスかを調べ
-                // ブレークポイントの場合は以下を行う
-                // - プログラムカウンタを1減らす
-                // - 0xccに書き換えたメモリを元の値に戻す
-
+                // 停止したアドレスがブレークポイントのアドレスかを調べる
+                let mut regs = ptrace::getregs(self.info.pid).unwrap();
+                if regs.rip-1 == self.info.brk_addr.unwrap() as u64 {
+                    println!("<<Breakpoint at {:#x}>>", regs.rip-1);
+                    // ブレークポイントの場合は以下を行う
+                    // プログラムカウンタを1減らす
+                    regs.rip -= 1;
+                    // 0xccに書き換えたメモリを元の値に戻す
+                    unsafe{
+                        ptrace::write(self.info.pid, self.info.brk_addr.unwrap(), self.info.brk_val as *mut c_void)?;
+                    }
+                    ptrace::setregs(self.info.pid, regs).ok();
+                }
                 Ok(State::Running(self))
             }
             _ => Err("waitpidの返り値が不正です".into()),
